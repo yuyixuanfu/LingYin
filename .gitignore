@@ -1,0 +1,9 @@
+.env
+lingyin_baseline.json
+*.pyc
+__pycache__/
+*.wav
+*.mp3
+*.m4a
+*.ogg
+*.webm
