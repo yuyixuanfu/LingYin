@@ -43,10 +43,10 @@
 |------|------|
 | Python 3.10+ | python.org |
 | ffmpeg | 音频转码。Windows: `winget install Gyan.FFmpeg` |
-| MiMo API Key | 小米 MiMo 开放平台，国内直连，注册免费额度 |
-| DeepSeek API Key | 深度求索，国内直连，便宜 |
+| 一个 ASR key | 转写用。默认 MiMo（小米，国内直连免梯子，注册免费额度）。也支持任意 OpenAI 兼容 ASR（OpenAI Whisper / 硅基流动 / Groq 等）。 |
+| 一个 LLM key | 听觉感知用。默认 DeepSeek（国内直连，便宜）。任意 OpenAI 兼容 LLM 都行。 |
 
-不需要梯子，不需要 GPU，不需要 torch。
+ASR 和 LLM 都可换，只要接口是 OpenAI 兼容（`/v1/chat/completions`）。不需要梯子（用默认 MiMo+DeepSeek 时），不需要 GPU，不需要 torch。
 
 ## 安装
 
@@ -57,7 +57,8 @@ pip install -r requirements.txt
 
 # 配置
 copy .env.example .env
-# 用记事本打开 .env，填上 MIMO_API_KEY 和 DS_API_KEY
+# 用记事本打开 .env，填上 ASR_API_KEY 和 LLM_API_KEY
+# (默认走 MiMo+DeepSeek，国内直连。想换别的 OpenAI 兼容服务，改 ASR_BASE_URL/LLM_BASE_URL/MODEL 即可)
 ```
 
 ## 接进 Claude Code（或任何 MCP 客户端）
@@ -100,12 +101,12 @@ print(hear(r"C:\path\to\voice.wav"))
 
 ## 支持的音频
 
-wav / mp3 / m4a / ogg / webm。长音频（>30 秒）自动压成 32kbps mp3 上传 MiMo，省传输。
+wav / mp3 / m4a / ogg / webm。长音频（>30 秒）自动压成 32kbps mp3 上传 ASR，省传输。
 
 ## 隐私（诚实版）
 
-- 音频会发给你配置的云端 ASR（MiMo）。接受不了就改成本地 whisper（自己改 `transcribe()`）。
-- 声学物理值 + DeepSeek 写的感知散文，只走 API 不落盘（除非你手动写日志）。
+- 音频会发给你配置的云端 ASR 转写。接受不了就换本地 whisper（`ASR_PROVIDER` 改成 openai 走本地 vLLM，或自己改 `transcribe()`）。
+- 声学物理值 + LLM 写的感知散文，只走 API 不落盘（除非你手动写日志）。
 - 基线 `lingyin_baseline.json` 存在本地，是说话人的平时音高/语速/停顿统计，不上传。
 - 代码就一个文件，欢迎自己审。
 

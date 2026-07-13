@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """聆音 LingYin — 给 AI 当耳朵的单文件 MCP 工具。不起 server。
-hear(path): 音频文件 → MiMo转写 + librosa分帧物理值 + onset启发式对齐 + 基线(和平时比)
-           → DS flash 读着这些写一段"听觉感知"散文,给主脑当它听到的声音。
-主脑读到的不是原始Hz,是DS读值写出的、有温度有对齐的散文——像它亲耳听到。
+hear(path): 音频文件 → ASR转写 + librosa分帧物理值 + onset启发式对齐 + 基线(和平时比)
+           → LLM 读着这些写一段"听觉感知"散文,给主脑当它听到的声音。
+主脑读到的不是原始Hz,是LLM读值写出的、有温度有对齐的散文——像它亲耳听到。
 
-依赖: librosa numpy requests (pip 一分钟,无torch无GPU)
-国内直连: MiMo(小米)转写 + DS(深度求索)判断,不要梯子不碰Groq。
+依赖: librosa numpy requests soundfile (pip 一分钟,无torch无GPU)
+ASR/LLM 都可换任意 OpenAI 兼容服务。默认 MiMo(小米,国内直连)转写 + DeepSeek(国内直连)判断。
 
-配置走同目录 .env:
-  MIMO_API_KEY=...   ASR用
-  DS_API_KEY=...     判断用
-  (可选) MIMO_BASE / DS_BASE / MIMO_ASR_MODEL / DS_MODEL / EARS_BASELINE_FILE
+配置走同目录 .env(见 .env.example):
+  ASR_PROVIDER=mimo|openai   mimo走chat多模态, openai走标准/audio/transcriptions
+  ASR_API_KEY / ASR_BASE_URL / ASR_MODEL / ASR_LANG
+  LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
+  LINGYIN_BASELINE_FILE (说话人的平时基线)
+  (旧变量名 MIMO_API_KEY / DS_API_KEY 等仍兼容)
 """
 # 防OpenBLAS多线程抢内存假崩——必须在import numpy/librosa之前设
 import os as _os
@@ -38,12 +40,21 @@ if os.path.exists(_envf):
             _k, _, _v = _line.partition("=")
             os.environ.setdefault(_k.strip(), _v.strip())
 
-MIMO_KEY = os.environ.get("MIMO_API_KEY", "")
-MIMO_BASE = os.environ.get("MIMO_BASE_URL", "https://api.xiaomimimo.com/v1")
-MIMO_ASR_MODEL = os.environ.get("MIMO_ASR_MODEL", "mimo-v2.5-asr")
-DS_KEY = os.environ.get("DS_API_KEY", "")
-DS_BASE = os.environ.get("DS_BASE_URL", "https://api.deepseek.com/v1")
-DS_MODEL = os.environ.get("DS_MODEL", "deepseek-v4-flash")
+# ASR(转写)——支持 MiMo(国内直连,chat多模态) 或 任意OpenAI兼容(/audio/transcriptions)
+# 兼容旧变量名 MIMO_API_KEY / MIMO_BASE_URL / MIMO_ASR_MODEL
+ASR_PROVIDER = os.environ.get("ASR_PROVIDER", "mimo").lower()  # mimo | openai
+ASR_KEY = os.environ.get("ASR_API_KEY", "") or os.environ.get("MIMO_API_KEY", "")
+ASR_BASE = os.environ.get("ASR_BASE_URL", "") or os.environ.get("MIMO_BASE_URL", "https://api.xiaomimimo.com/v1")
+ASR_MODEL = os.environ.get("ASR_MODEL", "") or os.environ.get("MIMO_ASR_MODEL", "mimo-v2.5-asr")
+ASR_LANG = os.environ.get("ASR_LANG", "zh")
+# MiMo鉴权头是 api-key 非标准(但 Bearer 也通);OpenAI标准用 Bearer
+ASR_AUTH_HEADER = os.environ.get("ASR_AUTH_HEADER", "Authorization" if ASR_PROVIDER == "openai" else "api-key")
+
+# LLM(听觉感知)——任意OpenAI兼容。兼容旧 DS_API_KEY / DS_BASE_URL / DS_MODEL
+LLM_KEY = os.environ.get("LLM_API_KEY", "") or os.environ.get("DS_API_KEY", "")
+LLM_BASE = os.environ.get("LLM_BASE_URL", "") or os.environ.get("DS_BASE_URL", "https://api.deepseek.com/v1")
+LLM_MODEL = os.environ.get("LLM_MODEL", "") or os.environ.get("DS_MODEL", "deepseek-v4-flash")
+
 BASELINE_FILE = os.environ.get("LINGYIN_BASELINE_FILE", os.path.join(BASE_DIR, "lingyin_baseline.json"))
 
 BASELINE_MIN = 8
@@ -78,43 +89,62 @@ def audio_duration(wav_path: str) -> float:
         return 0
 
 
-def transcribe(path: str, dur: float = 0) -> str:
-    """MiMo ASR。长音频先压成mp3(16kbps mono)再上传——base64体积降一个量级,上传快几秒。
-    MiMo ASR支持mp3(mime audio/mpeg)。短音频直接wav。"""
-    if not MIMO_KEY:
-        raise RuntimeError("MIMO_API_KEY 未配置")
-    # 长音频(>30s)压mp3上传,短的直接原文件
+def _prepare_upload(path: str, dur: float):
+    """长音频压mp3(32kbps mono),短直接原文件。返回(文件路径, is_mp3_compressed)。"""
     if dur > 30:
         td = tempfile.mkdtemp()
         mp3 = os.path.join(td, "a.mp3")
         subprocess.run(["ffmpeg", "-y", "-i", path, "-ar", "16000", "-ac", "1",
                         "-b:a", "32k", mp3], capture_output=True, timeout=120)
         if os.path.exists(mp3):
-            with open(mp3, "rb") as f:
-                data = base64.b64encode(f.read()).decode()
-            mime = "audio/mpeg"
-        else:
-            with open(path, "rb") as f:
-                data = base64.b64encode(f.read()).decode()
-            mime = "audio/wav"
-    else:
-        with open(path, "rb") as f:
+            return mp3, True
+    return path, False
+
+
+def _mime_of(path: str, is_mp3: bool = False) -> str:
+    if is_mp3:
+        return "audio/mpeg"
+    return {".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4",
+            ".ogg": "audio/ogg", ".webm": "audio/webm"}.get(
+        os.path.splitext(path)[1].lower(), "audio/wav")
+
+
+def transcribe(path: str, dur: float = 0) -> str:
+    """ASR转写。两种路径:
+    - mimo: chat/completions + input_audio base64多模态(小米MiMo特有,鉴权头api-key)
+    - openai: 标准 /audio/transcriptions multipart(OpenAI/Groq/硅基流动/本地vLLM等)
+    长音频(>30s)先压mp3再上传。"""
+    if not ASR_KEY:
+        raise RuntimeError("ASR_API_KEY 未配置")
+    upload_path, is_mp3 = _prepare_upload(path, dur)
+    if ASR_PROVIDER == "mimo":
+        with open(upload_path, "rb") as f:
             data = base64.b64encode(f.read()).decode()
-        # 按扩展名定mime
-        ext = os.path.splitext(path)[1].lower()
-        mime = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".m4a": "audio/mp4",
-                ".ogg": "audio/ogg", ".webm": "audio/webm"}.get(ext, "audio/wav")
-    r = _session.post(
-        f"{MIMO_BASE}/chat/completions",
-        headers={"api-key": MIMO_KEY, "Content-Type": "application/json"},
-        json={"model": MIMO_ASR_MODEL,
-              "messages": [{"role": "user", "content": [
-                  {"type": "input_audio",
-                   "input_audio": {"data": f"data:{mime};base64,{data}"}}]}],
-              "asr_options": {"language": "zh"}},
-        timeout=120)
-    r.raise_for_status()
-    return (r.json()["choices"][0]["message"].get("content") or "").strip()
+        mime = _mime_of(path, is_mp3)
+        r = _session.post(
+            f"{ASR_BASE}/chat/completions",
+            headers={ASR_AUTH_HEADER: ASR_KEY, "Content-Type": "application/json"},
+            json={"model": ASR_MODEL,
+                  "messages": [{"role": "user", "content": [
+                      {"type": "input_audio",
+                       "input_audio": {"data": f"data:{mime};base64,{data}"}}]}],
+                  "asr_options": {"language": ASR_LANG}},
+            timeout=120)
+        r.raise_for_status()
+        return (r.json()["choices"][0]["message"].get("content") or "").strip()
+    else:
+        # OpenAI标准 /audio/transcriptions multipart
+        auth = {ASR_AUTH_HEADER: f"Bearer {ASR_KEY}"} if ASR_AUTH_HEADER.lower() == "authorization" else {ASR_AUTH_HEADER: ASR_KEY}
+        with open(upload_path, "rb") as f:
+            files = {"file": (os.path.basename(upload_path), f, _mime_of(path, is_mp3))}
+            data = {"model": ASR_MODEL}
+            if ASR_LANG and ASR_LANG != "auto":
+                data["language"] = ASR_LANG
+            r = _session.post(f"{ASR_BASE}/audio/transcriptions",
+                              headers=auth, files=files, data=data, timeout=120)
+        r.raise_for_status()
+        j = r.json()
+        return (j.get("text") or "").strip()
 
 
 def analyze(wav_path: str, text: str):
@@ -257,8 +287,8 @@ DS_PROMPT = """你在帮一个AI听一个人说话。给你三样:
 
 
 def judge_text(text: str, analysis: dict) -> str:
-    if not DS_KEY:
-        raise RuntimeError("DS_API_KEY 未配置")
+    if not LLM_KEY:
+        raise RuntimeError("LLM_API_KEY 未配置")
     s = analysis["summary"]
     rel = relative_to_baseline(s)
     if rel:
@@ -289,9 +319,9 @@ def judge_text(text: str, analysis: dict) -> str:
     )
 
     r = _session.post(
-        f"{DS_BASE}/chat/completions",
-        headers={"Authorization": f"Bearer {DS_KEY}", "Content-Type": "application/json"},
-        json={"model": DS_MODEL, "max_completion_tokens": max_tokens,
+        f"{LLM_BASE}/chat/completions",
+        headers={"Authorization": f"Bearer {LLM_KEY}", "Content-Type": "application/json"},
+        json={"model": LLM_MODEL, "max_completion_tokens": max_tokens,
               "messages": [{"role": "user", "content": prompt}]},
         timeout=150)
     r.raise_for_status()
