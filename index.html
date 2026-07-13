@@ -124,22 +124,22 @@ li{margin-bottom:5px}
     <h2 class="sec"><span class="num">2</span>组成</h2>
     <p>聆音由五个环节串成，全部在本地 Python 进程内完成，不起任何 HTTP 服务：</p>
     <div class="steps">
-      <div class="step"><div class="n">01</div><div class="tx">转写 <span>· MiMo ASR 把语音转成文字（说了什么）</span></div></div>
+      <div class="step"><div class="n">01</div><div class="tx">转写 <span>· ASR 把语音转成文字（说了什么）</span></div></div>
       <div class="step"><div class="n">02</div><div class="tx">分帧 <span>· librosa 每 100ms 抽一帧 {音高, 能量, 频谱亮度}</span></div></div>
       <div class="step"><div class="n">03</div><div class="tx">对齐 <span>· onset 起始点把意群映射到时间区间（启发式，不下模型）</span></div></div>
       <div class="step"><div class="n">04</div><div class="tx">基线 <span>· 个人"平时"音高/语速/停顿，中位数±MAD，8 条冷启动</span></div></div>
-      <div class="step"><div class="n">05</div><div class="tx">读懂 <span>· DeepSeek 读着分帧轨迹写出一段听觉感知散文</span></div></div>
+      <div class="step"><div class="n">05</div><div class="tx">读懂 <span>· LLM 读着分帧轨迹写出一段听觉感知散文</span></div></div>
     </div>
     <p>主脑最终读到的不是原始赫兹数字，是另一个模型读声学形状写出的、有对齐有现场的散文——像它亲耳听到。</p>
 
     <div class="pull">描述一落，物就没了。所以要给形状，不给标签。</div>
 
     <h2 class="sec"><span class="num">3</span>怎么用</h2>
-    <p><span class="runin">安装。</span>需要 Python 3.10+、ffmpeg、一个 MiMo key、一个 DeepSeek key。不需要梯子，不需要 GPU，不需要 torch。</p>
+    <p><span class="runin">安装。</span>需要 Python 3.10+、ffmpeg、一个 ASR key、一个 LLM key。任意 OpenAI 兼容服务都行，默认走国内直连。不需要梯子，不需要 GPU，不需要 torch。</p>
     <pre><code>git clone https://github.com/yuyixuanfu/LingYin.git
 cd LingYin
 pip install -r requirements.txt
-copy .env.example .env   # 填 MIMO_API_KEY 和 DS_API_KEY</code></pre>
+copy .env.example .env   # 填 ASR_API_KEY 和 LLM_API_KEY</code></pre>
 
     <p><span class="runin">接进 Claude Code。</span>在 <code>.mcp.json</code> 里加一项，重启即可：</p>
     <pre><code>{
@@ -170,7 +170,7 @@ print(hear(r"C:\加缪朗读.wav"))
     <p><span class="runin">为什么学的是"她"不是全人类。</span>同一个音高对 A 是平静对 B 是低落。聆音存说话人的个人基线，用中位数±MAD 而非均值±标准差——偶尔几条在地铁里录的异常样本拉不动中位数，基线天生抗场景污染。</p>
     <p><span class="runin">为什么慢。</span>一次听 30–45 秒。不是查标签，是一个模型读着声学帧轨迹、边推理边写出有对齐的感知。慢是这套机制的成本，不是 bug。</p>
     <p><span class="runin">为什么轻量。</span>依赖只有 librosa、numpy、requests、soundfile。一个文件，开源出来 pip 一分钟装完。对齐用 librosa onset 启发式而非 Whisper 强制对齐——不下模型，别人 clone 就能跑。</p>
-    <p><span class="runin">隐私。</span>音频发给配置的云端 ASR（MiMo）转写；声学物理值和感知散文只走 API 不落盘；个人基线是本地一个 json，不上传。代码就一个文件，欢迎审计。</p>
+    <p><span class="runin">隐私。</span>音频发给配置的云端 ASR 转写；声学物理值和感知散文只走 API 不落盘；个人基线是本地一个 json，不上传。代码就一个文件，欢迎审计。</p>
 
     <h2 class="sec"><span class="num">5</span>取名</h2>
     <p>聆——俯身细听，听明白，听进去，古文里专指听清楚，比"听"更主动更细。音——声里有意义的部分，是"怎说的"那层。聆音：俯身细听，听进声音里的意思。</p>
